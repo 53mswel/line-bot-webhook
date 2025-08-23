@@ -11,6 +11,10 @@ app.use(bodyParser.json());
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID;
 
+// 環境変数確認ログ（デプロイ後に一度だけでOK）
+console.log("LINE_ACCESS_TOKEN:", LINE_ACCESS_TOKEN ? "OK" : "NOT SET");
+console.log("ADMIN_USER_ID:", ADMIN_USER_ID ? "OK" : "NOT SET");
+
 const client = new Client({
   channelAccessToken: LINE_ACCESS_TOKEN,
 });
@@ -73,15 +77,6 @@ cron.schedule('0 9 * * 6', async () => {
     await sendFileToLine(ADMIN_USER_ID, filePath);
   }
 });
-
-// テスト用：手動でCSV生成＋送信（本番はコメントアウト）
-(async () => {
-  console.log('Test: CSV生成＋送信開始');
-  for (const date in userDataByDate) {
-    const filePath = await exportCSVByDate(date, userDataByDate[date]);
-    await sendFileToLine(ADMIN_USER_ID, filePath);
-  }
-})();
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
