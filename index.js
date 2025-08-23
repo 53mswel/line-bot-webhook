@@ -1,129 +1,101 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const fs = require('fs');
-const { Client } = require('@line/bot-sdk');
-const cron = require('node-cron');
+require("dotenv").config();
+const express = require("express");
+const line = require("@line/bot-sdk");
 
 const app = express();
-app.use(bodyParser.json());
 
-// 環境変数から取得
-const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
-const ADMIN_USER_ID = process.env.ADMIN_USER_ID;
+// ==== 環境変数から設定を取得 ====
+const config = {
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.LINE_CHANNEL_SECRET,
+};
 
-if (!LINE_ACCESS_TOKEN) {
-  console.error('Error: LINE_ACCESS_TOKEN is not set.');
-  process.exit(1);
+if (!config.channelAccessToken || !config.channelSecret) {
+  throw new Error("LINE_CHANNEL_ACCESS_TOKEN または LINE_CHANNEL_SECRET が設定されていません。");
 }
 
-if (!ADMIN_USER_ID) {
-  console.error('Error: ADMIN_USER_ID is not set.');
-  process.exit(1);
-}
+const client = new line.Client(config);
 
-const client = new Client({
-  channelAccessToken: LINE_ACCESS_TOKEN,
+// ==== 参加希望リストを保存するメモリDB ====
+let participantList = [];
+
+// ==== 過去日付の参加者を自動削除する関数 ====
+function cleanUpOldEntries() {
+  const today = new Date().toISOString().split("T")[0];
+  participantList = participantList.filter((p) => p.date >= today);
+}
+setInterval(cleanUpOldEntries, 60 * 60 * 1000); // 1時間ごとに実行
+
+// ==== Webhookエンドポイント ====
+app.post("/webhook", line.middleware(config), (req, res) => {
+  Promise.all(req.body.events.map(handleEvent))
+    .then((result) => res.json(result))
+    .catch((err) => {
+      console.error(err);
+      res.status(500).end();
+    });
 });
 
-const PORT = process.env.PORT || 3000;
+// ==== イベント処理 ====
+async function handleEvent(event) {
+  if (event.type !== "message" || event.message.type !== "text") {
+    return Promise.resolve(null);
+  }
 
-// 参加者データをサーバー内に保存（参加日ごと）
-let userDataByDate = {}; // { '9月2日': ['Uxxxx', 'Uyyyy'], ... }
+  const userMessage = event.message.text.trim();
 
-// CSV生成関数
-async function exportCSVByDate(date, userIds) {
-  const fileName = `participants_${date}.csv`;
-  const filePath = `/tmp/${fileName}`;
-  const csvContent = userIds.join('\n');
-  fs.writeFileSync(filePath, csvContent);
-  console.log(`CSV generated: ${filePath}`);
-  return filePath;
-}
+  // ✅ テストモードと本番モードを切り替え
+  const mode = process.env.MODE || "test"; // test or production
 
-// 管理者LINEにファイル送信
-async function sendFileToLine(userId, filePath) {
-  await client.pushMessage(userId, {
-    type: 'text',
-    text: `参加者CSV: ${filePath} が生成されました`,
-  });
-  console.log(`File sent to LINE admin: ${filePath}`);
-}
-
-// 日付文字列を Date オブジェクトに変換（例: "9月2日" → 今年の9月2日）
-function parseDateString(dateStr) {
-  const match = dateStr.match(/(\d+)月(\d+)日/);
-  if (!match) return null;
-  const year = new Date().getFullYear();
-  const month = parseInt(match[1], 10) - 1; // JS の月は0始まり
-  const day = parseInt(match[2], 10);
-  return new Date(year, month, day);
-}
-
-// Webhook処理
-app.post('/webhook', (req, res) => {
-  const events = req.body.events || [];
-  events.forEach((event) => {
-    if (event.type === 'message' && event.message.type === 'text') {
-      const userId = event.source.userId;
-      const dateText = event.message.text; // 例: "9月2日に参加する"
-
-      if (!userDataByDate[dateText]) {
-        userDataByDate[dateText] = [];
-      }
-      if (!userDataByDate[dateText].includes(userId)) {
-        userDataByDate[dateText].push(userId);
-      }
-      console.log(`📥 ${userId} を ${dateText} に追加`);
-
-      // 確認メッセージ自動返信
-      client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: `${dateText} として登録しました！`,
+  if (mode === "test") {
+    // テスト用挙動
+    if (userMessage.startsWith("予約 ")) {
+      const date = userMessage.replace("予約 ", "");
+      participantList.push({ userId: event.source.userId, date });
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: `✅ [テスト] ${date} に予約しました。`,
+      });
+    } else if (userMessage === "一覧") {
+      cleanUpOldEntries();
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text:
+          participantList.length === 0
+            ? "📭 [テスト] 現在の参加者はいません。"
+            : participantList.map((p) => `・${p.userId} : ${p.date}`).join("\n"),
       });
     }
+  } else {
+    // 本番用挙動
+    if (userMessage.startsWith("希望日 ")) {
+      const date = userMessage.replace("希望日 ", "");
+      participantList.push({ userId: event.source.userId, date });
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: `✅ ${date} に参加希望を登録しました。`,
+      });
+    } else if (userMessage === "参加者リスト") {
+      cleanUpOldEntries();
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text:
+          participantList.length === 0
+            ? "📭 現在の参加者はいません。"
+            : participantList.map((p) => `・${p.userId} : ${p.date}`).join("\n"),
+      });
+    }
+  }
+
+  // デフォルト応答
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: "📌 日付を入力して予約してください。\n例: 希望日 2025-08-30",
   });
-  res.sendStatus(200);
-});
+}
 
-// cron設定：毎週土曜9時にCSV生成＆送信＋過去日削除
-cron.schedule('0 9 * * 6', async () => {
-  console.log('Cron: 週次CSV生成開始');
-
-  const today = new Date();
-  for (const date in userDataByDate) {
-    const targetDate = parseDateString(date);
-    if (!targetDate) continue;
-
-    // CSV生成＋送信
-    const filePath = await exportCSVByDate(date, userDataByDate[date]);
-    await sendFileToLine(ADMIN_USER_ID, filePath);
-
-    // 過去日の場合はリスト削除
-    if (targetDate < today) {
-      delete userDataByDate[date];
-      console.log(`過去日データ削除: ${date}`);
-    }
-  }
-});
-
-// テスト用：サーバー起動時に最新データをCSV生成＋送信
-(async () => {
-  console.log('Test: CSV生成＋送信開始');
-  const today = new Date();
-  for (const date in userDataByDate) {
-    const targetDate = parseDateString(date);
-    if (!targetDate) continue;
-
-    const filePath = await exportCSVByDate(date, userDataByDate[date]);
-    await sendFileToLine(ADMIN_USER_ID, filePath);
-
-    if (targetDate < today) {
-      delete userDataByDate[date];
-      console.log(`過去日データ削除: ${date}`);
-    }
-  }
-})();
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+// ==== サーバー起動 ====
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server running on ${port}`);
 });
