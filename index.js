@@ -1,34 +1,49 @@
 const express = require('express');
-const app = express();
 const line = require('@line/bot-sdk');
 
-app.use(express.json());
+const app = express();
 
+// 環境変数から読み込み（RenderのEnvironment Variablesに設定する）
 const config = {
-  channelAccessToken: 'YOUR_CHANNEL_ACCESS_TOKEN',
-  channelSecret: 'YOUR_CHANNEL_SECRET',
+  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.CHANNEL_SECRET
 };
 
 const client = new line.Client(config);
 
-app.post('/webhook', (req, res) => {
-  Promise.all(req.body.events.map((event) => {
-    if (event.type === 'message' && event.message.type === 'text') {
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: event.message.text,
-      });
-    }
-    return Promise.resolve(null);
-  }))
-  .then(() => res.sendStatus(200))
-  .catch((err) => {
+// Webhookエンドポイント
+app.post('/webhook', line.middleware(config), async (req, res) => {
+  try {
+    const events = req.body.events;
+    const results = await Promise.all(events.map(handleEvent));
+    res.json(results);
+  } catch (err) {
     console.error(err);
-    res.sendStatus(500);
-  });
+    res.status(500).end();
+  }
 });
 
+// イベント処理
+async function handleEvent(event) {
+  // ポストバックアクションが返ってきた場合
+  if (event.type === 'postback') {
+    const selectedDate = event.postback.data; 
+    // 例: "9月2日" がここに入る
+
+    const replyMessage = {
+      type: 'text',
+      text: `${selectedDate}に参加する`
+    };
+
+    return client.replyMessage(event.replyToken, replyMessage);
+  }
+
+  // それ以外のイベントは無視
+  return Promise.resolve(null);
+}
+
+// Renderで動かす用ポート設定
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
