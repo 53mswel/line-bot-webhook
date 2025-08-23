@@ -1,17 +1,19 @@
 {
   "name": "line-bot-webhook",
   "version": "1.0.0",
-  "description": "LINEボット Webhook + 週次参加者CSV送信サンプル",
+  "description": "LINE Messaging API bot using Express",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
-    "@line/bot-sdk": "^7.9.0",
-    "axios": "^1.6.3",
+    "@line/bot-sdk": "^7.5.2",
     "express": "^4.18.2",
-    "body-parser": "^1.20.2",
-    "node-cron": "^3.0.2"
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   },
   "engines": {
     "node": "22.x"
