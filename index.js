@@ -11,9 +11,15 @@ app.use(bodyParser.json());
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID;
 
-// 環境変数確認ログ（デプロイ後に一度だけでOK）
-console.log("LINE_ACCESS_TOKEN:", LINE_ACCESS_TOKEN ? "OK" : "NOT SET");
-console.log("ADMIN_USER_ID:", ADMIN_USER_ID ? "OK" : "NOT SET");
+if (!LINE_ACCESS_TOKEN) {
+  console.error('Error: LINE_ACCESS_TOKEN is not set.');
+  process.exit(1);
+}
+
+if (!ADMIN_USER_ID) {
+  console.error('Error: ADMIN_USER_ID is not set.');
+  process.exit(1);
+}
 
 const client = new Client({
   channelAccessToken: LINE_ACCESS_TOKEN,
@@ -43,9 +49,19 @@ async function sendFileToLine(userId, filePath) {
   console.log(`File sent to LINE admin: ${filePath}`);
 }
 
+// 日付文字列を Date オブジェクトに変換（例: "9月2日" → 今年の9月2日）
+function parseDateString(dateStr) {
+  const match = dateStr.match(/(\d+)月(\d+)日/);
+  if (!match) return null;
+  const year = new Date().getFullYear();
+  const month = parseInt(match[1], 10) - 1; // JS の月は0始まり
+  const day = parseInt(match[2], 10);
+  return new Date(year, month, day);
+}
+
 // Webhook処理
 app.post('/webhook', (req, res) => {
-  const events = req.body.events;
+  const events = req.body.events || [];
   events.forEach((event) => {
     if (event.type === 'message' && event.message.type === 'text') {
       const userId = event.source.userId;
@@ -69,14 +85,44 @@ app.post('/webhook', (req, res) => {
   res.sendStatus(200);
 });
 
-// cron設定：毎週土曜9時にCSV生成＆送信
+// cron設定：毎週土曜9時にCSV生成＆送信＋過去日削除
 cron.schedule('0 9 * * 6', async () => {
   console.log('Cron: 週次CSV生成開始');
+
+  const today = new Date();
   for (const date in userDataByDate) {
+    const targetDate = parseDateString(date);
+    if (!targetDate) continue;
+
+    // CSV生成＋送信
     const filePath = await exportCSVByDate(date, userDataByDate[date]);
     await sendFileToLine(ADMIN_USER_ID, filePath);
+
+    // 過去日の場合はリスト削除
+    if (targetDate < today) {
+      delete userDataByDate[date];
+      console.log(`過去日データ削除: ${date}`);
+    }
   }
 });
+
+// テスト用：サーバー起動時に最新データをCSV生成＋送信
+(async () => {
+  console.log('Test: CSV生成＋送信開始');
+  const today = new Date();
+  for (const date in userDataByDate) {
+    const targetDate = parseDateString(date);
+    if (!targetDate) continue;
+
+    const filePath = await exportCSVByDate(date, userDataByDate[date]);
+    await sendFileToLine(ADMIN_USER_ID, filePath);
+
+    if (targetDate < today) {
+      delete userDataByDate[date];
+      console.log(`過去日データ削除: ${date}`);
+    }
+  }
+})();
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
