@@ -1,118 +1,88 @@
-const fs = require("fs");
-const path = require("path");
-const express = require("express");
-const bodyParser = require("body-parser");
-const cron = require("node-cron");
-const axios = require("axios");
+const express = require('express');
+const bodyParser = require('body-parser');
+const fs = require('fs');
+const { Client } = require('@line/bot-sdk');
+const cron = require('node-cron');
 
 const app = express();
 app.use(bodyParser.json());
 
-// 環境変数
+// 環境変数から取得
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN;
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID;
+
+const client = new Client({
+  channelAccessToken: LINE_ACCESS_TOKEN,
+});
+
 const PORT = process.env.PORT || 3000;
 
-// 日付ごとにユーザーIDを保持するオブジェクト
-let userDataByDate = {};
+// 参加者データをサーバー内に保存（参加日ごと）
+let userDataByDate = {}; // { '9月2日': ['Uxxxx', 'Uyyyy'], ... }
 
-// ----------------------
-// Webhook受信処理
-// ----------------------
-app.post("/webhook", (req, res) => {
-  const events = req.body.events || [];
-  
-  events.forEach(event => {
-    if (event.type === "message" && event.message.type === "text") {
+// CSV生成関数
+async function exportCSVByDate(date, userIds) {
+  const fileName = `participants_${date}.csv`;
+  const filePath = `/tmp/${fileName}`;
+  const csvContent = userIds.join('\n');
+  fs.writeFileSync(filePath, csvContent);
+  console.log(`CSV generated: ${filePath}`);
+  return filePath;
+}
+
+// 管理者LINEにファイル送信
+async function sendFileToLine(userId, filePath) {
+  await client.pushMessage(userId, {
+    type: 'text',
+    text: `参加者CSV: ${filePath} が生成されました`,
+  });
+  console.log(`File sent to LINE admin: ${filePath}`);
+}
+
+// Webhook処理
+app.post('/webhook', (req, res) => {
+  const events = req.body.events;
+  events.forEach((event) => {
+    if (event.type === 'message' && event.message.type === 'text') {
       const userId = event.source.userId;
-      const date = event.message.text.trim(); // 例: "2025-09-20"
+      const dateText = event.message.text; // 例: "9月2日に参加する"
 
-      if (!userDataByDate[date]) userDataByDate[date] = [];
-      if (!userDataByDate[date].includes(userId)) {
-        userDataByDate[date].push(userId);
-        console.log(`📥 ${userId} を ${date} に追加`);
+      if (!userDataByDate[dateText]) {
+        userDataByDate[dateText] = [];
       }
+      if (!userDataByDate[dateText].includes(userId)) {
+        userDataByDate[dateText].push(userId);
+      }
+      console.log(`📥 ${userId} を ${dateText} に追加`);
+
+      // 確認メッセージ自動返信
+      client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `${dateText} として登録しました！`,
+      });
     }
   });
-
   res.sendStatus(200);
 });
 
-// ----------------------
-// CSV生成
-// ----------------------
-function exportCSVByDate(data) {
-  const files = [];
-  Object.keys(data).forEach(date => {
-    const filename = path.join(__dirname, `joined_${date}.csv`);
-    const content = data[date].join("\n");
-    fs.writeFileSync(filename, content, "utf8");
-    files.push({ date, filename });
-  });
-  return files;
-}
-
-// ----------------------
-// LINEにファイル送信
-// ----------------------
-async function sendFileToLine(userId, filePath) {
-  const fileName = path.basename(filePath);
-  const fileData = fs.readFileSync(filePath);
-
-  try {
-    await axios.post(
-      "https://api-data.line.me/v2/bot/message/push",
-      {
-        to: userId,
-        messages: [
-          {
-            type: "file",
-            originalContentUrl: "data:text/plain;base64," + fileData.toString("base64"),
-            fileName: fileName
-          }
-        ]
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${LINE_ACCESS_TOKEN}`
-        }
-      }
-    );
-    console.log(`✅ ${fileName} をLINEに送信しました`);
-  } catch (err) {
-    console.error("❌ 送信エラー:", err.response?.data || err.message);
+// cron設定：毎週土曜9時にCSV生成＆送信
+cron.schedule('0 9 * * 6', async () => {
+  console.log('Cron: 週次CSV生成開始');
+  for (const date in userDataByDate) {
+    const filePath = await exportCSVByDate(date, userDataByDate[date]);
+    await sendFileToLine(ADMIN_USER_ID, filePath);
   }
-}
-
-// ----------------------
-// 週次送信タスク（毎週土曜9時）
-// ----------------------
-cron.schedule("0 9 * * 6", async () => {
-  console.log("📤 週次レポート作成開始...");
-
-  const today = new Date();
-
-  const files = exportCSVByDate(userDataByDate);
-
-  for (const file of files) {
-    await sendFileToLine(ADMIN_USER_ID, file.filename);
-
-    // 参加日が今日以降の場合、送信後に削除
-    const fileDate = new Date(file.date);
-    if (fileDate <= today) {
-      delete userDataByDate[file.date];
-      fs.unlinkSync(file.filename);
-      console.log(`🗑 ${file.filename} を削除しました`);
-    }
-  }
-
-  console.log("📤 週次レポート作成完了");
 });
 
-// ----------------------
-// サーバー起動
-// ----------------------
+// テスト用：手動でCSV生成＋送信（本番はコメントアウト）
+(async () => {
+  console.log('Test: CSV生成＋送信開始');
+  for (const date in userDataByDate) {
+    const filePath = await exportCSVByDate(date, userDataByDate[date]);
+    await sendFileToLine(ADMIN_USER_ID, filePath);
+  }
+})();
+
 app.listen(PORT, () => {
-  console.log(`LINEボットサーバー起動中: http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
