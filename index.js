@@ -85,7 +85,7 @@ app.post('/webhook', (req, res) => {
 });
 
 // cron設定：毎週日曜15:00にCSV生成＆送信
-cron.schedule('0 15 * * 0', async () => {
+cron.schedule('0 6 * * 0', async () => {
   console.log('Cron: 週次CSV生成開始');
   const today = new Date();
 
