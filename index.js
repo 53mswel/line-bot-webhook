@@ -27,16 +27,31 @@ const PORT = process.env.PORT || 3000;
 // サーバー側で参加者IDを日付ごとに管理
 let userDataByDate = {}; // { '9月2日': ['Uxxxx', 'Uyyyy'], ... }
 
-// CSV生成関数
+// CSV生成関数（ID＋名前）
 async function exportCSVByDate(date, userIds) {
   const fileName = `participants_${date}.csv`;
   const filePath = `/tmp/${fileName}`;
+
+  // プロフィール取得
+  const records = [];
+  for (const id of userIds) {
+    try {
+      const profile = await client.getProfile(id);
+      records.push({ userId: id, name: profile.displayName });
+    } catch (err) {
+      console.log(`プロフィール取得失敗: ${id}`, err.message);
+      records.push({ userId: id, name: '' });
+    }
+  }
+
   const csvWriter = createObjectCsvWriter({
     path: filePath,
-    header: [{id: 'userId', title: 'UserID'}]
+    header: [
+      { id: 'userId', title: 'UserID' },
+      { id: 'name', title: 'Name' },
+    ],
   });
 
-  const records = userIds.map(id => ({ userId: id }));
   await csvWriter.writeRecords(records);
   console.log(`CSV generated: ${filePath}`);
   return filePath;
@@ -46,7 +61,7 @@ async function exportCSVByDate(date, userIds) {
 async function sendFileToLine(userId, filePath) {
   await client.pushMessage(userId, {
     type: 'text',
-    text: `参加者CSVが生成されました: ${filePath}`
+    text: `参加者CSVが生成されました: ${filePath}`,
   });
   console.log(`File sent to LINE admin: ${filePath}`);
 }
@@ -69,11 +84,10 @@ app.post('/webhook', (req, res) => {
   res.sendStatus(200);
 });
 
-// cron設定：毎週土曜9時にCSV生成＆送信
-cron.schedule('0 9 * * 6', async () => {
+// cron設定：毎週日曜15:00にCSV生成＆送信
+cron.schedule('0 15 * * 0', async () => {
   console.log('Cron: 週次CSV生成開始');
   const today = new Date();
-  const todayStr = `${today.getMonth()+1}月${today.getDate()}日`;
 
   for (const date in userDataByDate) {
     const filePath = await exportCSVByDate(date, userDataByDate[date]);
@@ -87,6 +101,7 @@ cron.schedule('0 9 * * 6', async () => {
       const d = new Date();
       d.setMonth(parseInt(month)-1);
       d.setDate(parseInt(day));
+      d.setHours(0,0,0,0);
       if (d < today) {
         delete userDataByDate[date];
         console.log(`Past date ${date} removed from server memory`);
