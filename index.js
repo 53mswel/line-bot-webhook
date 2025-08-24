@@ -1,10 +1,13 @@
-require("dotenv").config();
-const express = require("express");
-const line = require("@line/bot-sdk");
+import express from "express";
+import line from "@line/bot-sdk";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import csvWriter from "csv-writer";
 
-const app = express();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// ==== 環境変数から設定を取得 ====
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
@@ -15,87 +18,70 @@ if (!config.channelAccessToken || !config.channelSecret) {
 }
 
 const client = new line.Client(config);
+const app = express();
+app.use(express.json());
 
-// ==== 参加希望リストを保存するメモリDB ====
-let participantList = [];
-
-// ==== 過去日付の参加者を自動削除する関数 ====
-function cleanUpOldEntries() {
-  const today = new Date().toISOString().split("T")[0];
-  participantList = participantList.filter((p) => p.date >= today);
+const DATA_DIR = path.join(__dirname, "data");
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR);
 }
-setInterval(cleanUpOldEntries, 60 * 60 * 1000); // 1時間ごとに実行
 
-// ==== Webhookエンドポイント ====
-app.post("/webhook", line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent))
-    .then((result) => res.json(result))
-    .catch((err) => {
-      console.error(err);
-      res.status(500).end();
-    });
+// 📌 Webhook 受信（メッセージを保存するだけ）
+app.post("/webhook", (req, res) => {
+  const events = req.body.events;
+  events.forEach((event) => {
+    if (event.type === "message" && event.message.type === "text") {
+      const userId = event.source.userId;
+      const text = event.message.text;
+      const date = new Date().toISOString().split("T")[0];
+      const filePath = path.join(DATA_DIR, `${date}.csv`);
+
+      const row = `${userId},${text},${new Date().toISOString()}\n`;
+      fs.appendFileSync(filePath, row, "utf8");
+    }
+  });
+  res.status(200).send("OK");
 });
 
-// ==== イベント処理 ====
-async function handleEvent(event) {
-  if (event.type !== "message" || event.message.type !== "text") {
-    return Promise.resolve(null);
+// 📌 CSVを送信する関数
+async function sendCsvToLine() {
+  const date = new Date().toISOString().split("T")[0];
+  const filePath = path.join(DATA_DIR, `${date}.csv`);
+
+  if (!fs.existsSync(filePath)) {
+    console.log("本日のCSVはまだありません。");
+    return;
   }
 
-  const userMessage = event.message.text.trim();
-
-  // ✅ テストモードと本番モードを切り替え
-  const mode = process.env.MODE || "test"; // test or production
-
-  if (mode === "test") {
-    // テスト用挙動
-    if (userMessage.startsWith("予約 ")) {
-      const date = userMessage.replace("予約 ", "");
-      participantList.push({ userId: event.source.userId, date });
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: `✅ [テスト] ${date} に予約しました。`,
-      });
-    } else if (userMessage === "一覧") {
-      cleanUpOldEntries();
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text:
-          participantList.length === 0
-            ? "📭 [テスト] 現在の参加者はいません。"
-            : participantList.map((p) => `・${p.userId} : ${p.date}`).join("\n"),
-      });
-    }
-  } else {
-    // 本番用挙動
-    if (userMessage.startsWith("希望日 ")) {
-      const date = userMessage.replace("希望日 ", "");
-      participantList.push({ userId: event.source.userId, date });
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: `✅ ${date} に参加希望を登録しました。`,
-      });
-    } else if (userMessage === "参加者リスト") {
-      cleanUpOldEntries();
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text:
-          participantList.length === 0
-            ? "📭 現在の参加者はいません。"
-            : participantList.map((p) => `・${p.userId} : ${p.date}`).join("\n"),
-      });
-    }
-  }
-
-  // デフォルト応答
-  return client.replyMessage(event.replyToken, {
+  await client.pushMessage("U21ee3139f0313a2c74d50f0b4a615e05", {
     type: "text",
-    text: "📌 日付を入力して予約してください。\n例: 希望日 2025-08-30",
+    text: `CSVファイル (${date}) を送信します。`,
   });
+
+  const csvData = fs.readFileSync(filePath, "utf8");
+  const tempFile = path.join(DATA_DIR, `temp-${date}.txt`);
+  fs.writeFileSync(tempFile, csvData, "utf8");
+
+  await client.pushMessage("U21ee3139f0313a2c74d50f0b4a615e05", {
+    type: "text",
+    text: csvData, // LINEにはファイル添付APIがないので内容を直接送信
+  });
+
+  fs.unlinkSync(tempFile);
 }
 
-// ==== サーバー起動 ====
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server running on ${port}`);
+// 📌 テスト用エンドポイント（手動でCSV送信）
+app.get("/test-send", async (req, res) => {
+  try {
+    await sendCsvToLine();
+    res.send("テスト送信完了！");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("テスト送信失敗");
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
