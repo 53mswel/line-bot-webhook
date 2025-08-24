@@ -1,6 +1,7 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const fs = require('fs');
+const path = require('path');
 const { createObjectCsvWriter } = require('csv-writer');
 const { Client } = require('@line/bot-sdk');
 const cron = require('node-cron');
@@ -12,6 +13,7 @@ app.use(bodyParser.json());
 const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID;
+const BASE_URL = process.env.BASE_URL || `https://line-bot-webhook-1.onrender.com`; // RenderのURLを設定
 
 if (!LINE_CHANNEL_ACCESS_TOKEN || !LINE_CHANNEL_SECRET) {
   throw new Error("LINE_CHANNEL_ACCESS_TOKEN または LINE_CHANNEL_SECRET が設定されていません。");
@@ -54,16 +56,17 @@ async function exportCSVByDate(date, userIds) {
 
   await csvWriter.writeRecords(records);
   console.log(`CSV generated: ${filePath}`);
-  return filePath;
+  return { fileName, filePath };
 }
 
-// 管理者LINEに送信（テキストで通知）
-async function sendFileToLine(userId, filePath) {
+// 管理者LINEに送信（ダウンロードURLを通知）
+async function sendFileToLine(userId, fileName) {
+  const downloadUrl = `${BASE_URL}/download/${fileName}`;
   await client.pushMessage(userId, {
     type: 'text',
-    text: `参加者CSVが生成されました: ${filePath}`,
+    text: `参加者CSVが生成されました。こちらからダウンロードできます👇\n${downloadUrl}`,
   });
-  console.log(`File sent to LINE admin: ${filePath}`);
+  console.log(`File URL sent to LINE admin: ${downloadUrl}`);
 }
 
 // Webhook処理（参加日ごとにユーザーIDを追加）
@@ -84,14 +87,27 @@ app.post('/webhook', (req, res) => {
   res.sendStatus(200);
 });
 
-// cron設定：毎週日曜15:00にCSV生成＆送信
-cron.schedule('0 6 * * 0', async () => {
+// ダウンロード用エンドポイント
+app.get('/download/:fileName', (req, res) => {
+  const fileName = req.params.fileName;
+  const filePath = path.join('/tmp', fileName);
+
+  if (fs.existsSync(filePath)) {
+    res.download(filePath, fileName);
+  } else {
+    res.status(404).send('File not found');
+  }
+});
+
+// cron設定：毎週日曜16:00（日本時間）にCSV生成＆送信
+// 日本時間16:00 = UTC7:00
+cron.schedule('0 7 * * 0', async () => {
   console.log('Cron: 週次CSV生成開始');
   const today = new Date();
 
   for (const date in userDataByDate) {
-    const filePath = await exportCSVByDate(date, userDataByDate[date]);
-    await sendFileToLine(ADMIN_USER_ID, filePath);
+    const { fileName } = await exportCSVByDate(date, userDataByDate[date]);
+    await sendFileToLine(ADMIN_USER_ID, fileName);
   }
 
   // 過去の参加日リストを削除
@@ -99,9 +115,9 @@ cron.schedule('0 6 * * 0', async () => {
     const [month, day] = date.match(/\d+/g) || [];
     if (month && day) {
       const d = new Date();
-      d.setMonth(parseInt(month)-1);
+      d.setMonth(parseInt(month) - 1);
       d.setDate(parseInt(day));
-      d.setHours(0,0,0,0);
+      d.setHours(0, 0, 0, 0);
       if (d < today) {
         delete userDataByDate[date];
         console.log(`Past date ${date} removed from server memory`);
