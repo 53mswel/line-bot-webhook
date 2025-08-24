@@ -1,87 +1,100 @@
-import express from "express";
-import line from "@line/bot-sdk";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import csvWriter from "csv-writer";
+const express = require('express');
+const bodyParser = require('body-parser');
+const fs = require('fs');
+const { createObjectCsvWriter } = require('csv-writer');
+const { Client } = require('@line/bot-sdk');
+const cron = require('node-cron');
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const app = express();
+app.use(bodyParser.json());
 
-const config = {
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
-};
+// 環境変数
+const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
+const ADMIN_USER_ID = process.env.ADMIN_USER_ID;
 
-if (!config.channelAccessToken || !config.channelSecret) {
+if (!LINE_CHANNEL_ACCESS_TOKEN || !LINE_CHANNEL_SECRET) {
   throw new Error("LINE_CHANNEL_ACCESS_TOKEN または LINE_CHANNEL_SECRET が設定されていません。");
 }
 
-const client = new line.Client(config);
-const app = express();
-app.use(express.json());
-
-const DATA_DIR = path.join(__dirname, "data");
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR);
-}
-
-// 📌 Webhook 受信（メッセージを保存するだけ）
-app.post("/webhook", (req, res) => {
-  const events = req.body.events;
-  events.forEach((event) => {
-    if (event.type === "message" && event.message.type === "text") {
-      const userId = event.source.userId;
-      const text = event.message.text;
-      const date = new Date().toISOString().split("T")[0];
-      const filePath = path.join(DATA_DIR, `${date}.csv`);
-
-      const row = `${userId},${text},${new Date().toISOString()}\n`;
-      fs.appendFileSync(filePath, row, "utf8");
-    }
-  });
-  res.status(200).send("OK");
-});
-
-// 📌 CSVを送信する関数
-async function sendCsvToLine() {
-  const date = new Date().toISOString().split("T")[0];
-  const filePath = path.join(DATA_DIR, `${date}.csv`);
-
-  if (!fs.existsSync(filePath)) {
-    console.log("本日のCSVはまだありません。");
-    return;
-  }
-
-  await client.pushMessage("U21ee3139f0313a2c74d50f0b4a615e05", {
-    type: "text",
-    text: `CSVファイル (${date}) を送信します。`,
-  });
-
-  const csvData = fs.readFileSync(filePath, "utf8");
-  const tempFile = path.join(DATA_DIR, `temp-${date}.txt`);
-  fs.writeFileSync(tempFile, csvData, "utf8");
-
-  await client.pushMessage("U21ee3139f0313a2c74d50f0b4a615e05", {
-    type: "text",
-    text: csvData, // LINEにはファイル添付APIがないので内容を直接送信
-  });
-
-  fs.unlinkSync(tempFile);
-}
-
-// 📌 テスト用エンドポイント（手動でCSV送信）
-app.get("/test-send", async (req, res) => {
-  try {
-    await sendCsvToLine();
-    res.send("テスト送信完了！");
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("テスト送信失敗");
-  }
+const client = new Client({
+  channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
+  channelSecret: LINE_CHANNEL_SECRET,
 });
 
 const PORT = process.env.PORT || 3000;
+
+// サーバー側で参加者IDを日付ごとに管理
+let userDataByDate = {}; // { '9月2日': ['Uxxxx', 'Uyyyy'], ... }
+
+// CSV生成関数
+async function exportCSVByDate(date, userIds) {
+  const fileName = `participants_${date}.csv`;
+  const filePath = `/tmp/${fileName}`;
+  const csvWriter = createObjectCsvWriter({
+    path: filePath,
+    header: [{id: 'userId', title: 'UserID'}]
+  });
+
+  const records = userIds.map(id => ({ userId: id }));
+  await csvWriter.writeRecords(records);
+  console.log(`CSV generated: ${filePath}`);
+  return filePath;
+}
+
+// 管理者LINEに送信（テキストで通知）
+async function sendFileToLine(userId, filePath) {
+  await client.pushMessage(userId, {
+    type: 'text',
+    text: `参加者CSVが生成されました: ${filePath}`
+  });
+  console.log(`File sent to LINE admin: ${filePath}`);
+}
+
+// Webhook処理（参加日ごとにユーザーIDを追加）
+app.post('/webhook', (req, res) => {
+  const events = req.body.events || [];
+  events.forEach(event => {
+    if (event.type === 'message' && event.message.type === 'text') {
+      const userId = event.source.userId;
+      const dateText = event.message.text; // 例: "9月2日に参加する"
+
+      if (!userDataByDate[dateText]) userDataByDate[dateText] = [];
+      if (!userDataByDate[dateText].includes(userId)) {
+        userDataByDate[dateText].push(userId);
+      }
+      console.log(`📥 ${userId} を ${dateText} に追加`);
+    }
+  });
+  res.sendStatus(200);
+});
+
+// cron設定：毎週土曜9時にCSV生成＆送信
+cron.schedule('0 9 * * 6', async () => {
+  console.log('Cron: 週次CSV生成開始');
+  const today = new Date();
+  const todayStr = `${today.getMonth()+1}月${today.getDate()}日`;
+
+  for (const date in userDataByDate) {
+    const filePath = await exportCSVByDate(date, userDataByDate[date]);
+    await sendFileToLine(ADMIN_USER_ID, filePath);
+  }
+
+  // 過去の参加日リストを削除
+  for (const date in userDataByDate) {
+    const [month, day] = date.match(/\d+/g) || [];
+    if (month && day) {
+      const d = new Date();
+      d.setMonth(parseInt(month)-1);
+      d.setDate(parseInt(day));
+      if (d < today) {
+        delete userDataByDate[date];
+        console.log(`Past date ${date} removed from server memory`);
+      }
+    }
+  }
+});
+
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
