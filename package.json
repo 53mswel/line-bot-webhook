@@ -1,7 +1,7 @@
 {
   "name": "line-bot-webhook",
   "version": "1.0.0",
-  "description": "LINEボット Webhook + 週次参加者CSV送信サンプル",
+  "description": "LINEボット Webhook + 週次参加者CSV送信(ID＋名前付き)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
